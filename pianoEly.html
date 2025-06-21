@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Il Percorso Quotidiano di Ely</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        console.log("Script principale avviato.");
+
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, orderBy, limit, getDocs, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase variables
+        let app;
+        let db;
+        let auth;
+        let userId = 'anon-user';
+        let isAuthReady = false;
+        let appId; // Declare appId here to ensure module scope
+
+        // Custom alert/message box
+        const showMessage = (message, type = 'info') => {
+            console.log(`showMessage: ${message} (${type})`);
+            const messageBox = document.getElementById('message-box');
+            if (!messageBox) {
+                console.error("Errore: Elemento 'message-box' non trovato.");
+                return;
+            }
+            messageBox.textContent = message;
+            messageBox.className = 'fixed top-4 left-1/2 -translate-x-1/2 p-4 rounded-lg shadow-lg z-[1000] text-white transition-all duration-300';
+            if (type === 'info') {
+                messageBox.classList.add('bg-blue-500');
+            } else if (type === 'warning') {
+                messageBox.classList.add('bg-orange-500');
+            } else if (type === 'success') { // Added success type
+                messageBox.classList.add('bg-green-500');
+            } else if (type === 'error') { // Added error type
+                messageBox.classList.add('bg-red-500');
+            }
+            messageBox.classList.remove('hidden');
+            setTimeout(() => {
+                messageBox.classList.add('hidden');
+            }, 3000);
+        };
+
+        const generateMotivationalQuote = async (pastDataSummary) => {
+            console.log("Inizio generazione frase motivazionale.");
+            const motivationalQuoteElement = document.getElementById('motivational-quote');
+            if (motivationalQuoteElement) {
+                motivationalQuoteElement.textContent = 'Generazione della frase motivazionale...';
+            } else {
+                console.warn("Elemento 'motivational-quote' non trovato per aggiornamento.");
+            }
+            
+            let prompt = "Genera una breve frase motivazionale e personalizzata per un'adolescente di 14 anni che sta seguendo un percorso di benessere. Concentrati sull'energia, la forza e il sentirsi bene, senza menzionare numeri o dettagli specifici di peso/proteine. La frase deve essere incoraggiante e positiva. Se ho fornito dati passati, usali per rendere la frase più pertinente ai progressi, incoraggiando il mantenimento o il miglioramento. La frase deve essere unica ogni giorno. Ecco un riassunto dei progressi passati:\n";
+
+            if (pastDataSummary.length > 0) {
+                pastDataSummary.forEach(day => {
+                    prompt += `Data: ${day.date}, Proteine: ${day.proteins}g, Acqua: ${day.water}L, Attività: ${day.activityMinutes}min.\n`;
+                });
+                prompt += "Basandoti su questi dati, crea una frase che riconosca l'impegno o incoraggi un piccolo passo in più. Evita ripetizioni di frasi già usate se possibile."
+            } else {
+                prompt += "Nessun dato precedente disponibile. Concentrati su un inizio energico e positivo.";
+            }
+
+            try {
+                const payload = {
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        responseMimeType: "text/plain"
+                    }
+                };
+                const apiKey = "";
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+                    console.log("Frase motivazionale generata con successo.");
+                    return result.candidates[0].content.parts[0].text;
+                } else {
+                    console.warn("Nessun candidato valido nella risposta API per la frase motivazionale.");
+                    return "Oggi è il tuo giorno per brillare! Forza Ely! ✨";
+                }
+            } catch (error) {
+                console.error("Errore nella generazione della frase motivazionale:", error);
+                return "Oggi è il tuo giorno per brillare! Forza Ely! ✨";
+            }
+        };
+
+        let currentProteins = 0;
+        let currentWater = 0; // in Liters
+        let currentActivityMinutes = 0;
+        let currentCalories = 0; // Added calorie tracking
+        let selectedBreakfast = false;
+        let selectedMiddaySnack = false;
+        let selectedLunch = false;
+        let selectedAfternoonSnack = false;
+        let selectedActivity = false;
+        let selectedDinner = false;
+        let selectedBedtime = false;
+        let currentMotivationalQuote = '';
+
+        const proteinTarget = 65; // grams
+        const waterTarget = 2; // liters
+        const calorieTarget = 2000; // kcal target for Ely
+
+        const sections = ['intro-section', 'mattina-section', 'pranzo-section', 'pomeriggio-merenda-section', 'cena-riposo-section', 'summary-section', 'history-section'];
+        let currentSectionIndex = 0;
+
+        let proteinChartInstance = null;
+
+        const updateGlobalStats = () => {
+            const currentProteinsEl = document.getElementById('current-proteins');
+            const currentWaterEl = document.getElementById('current-water');
+            const currentCaloriesEl = document.getElementById('current-calories'); // Element for calories
+            const userIdDisplayEl = document.getElementById('user-id-display');
+
+            if (currentProteinsEl) currentProteinsEl.textContent = currentProteins;
+            if (currentWaterEl) currentWaterEl.textContent = currentWater.toFixed(1);
+            if (currentCaloriesEl) currentCaloriesEl.textContent = currentCalories; // Update calories display
+            if (userIdDisplayEl) userIdDisplayEl.textContent = `ID Utente: ${userId.substring(0, 8)}...`;
+            console.log(`Statistiche globali aggiornate: Proteine=${currentProteins}, Acqua=${currentWater.toFixed(1)}, Calorie=${currentCalories}, Utente=${userId.substring(0, 8)}...`);
+        };
+
+        const showSection = (index) => {
+            console.log(`Tentativo di mostrare sezione: ${sections[index]} (Indice: ${index})`);
+            sections.forEach((id) => {
+                const sectionElement = document.getElementById(id);
+                if (sectionElement) {
+                    sectionElement.classList.add('hidden');
+                } else {
+                    console.warn(`Elemento sezione non trovato: ${id}`);
+                }
+            });
+
+            const targetSectionElement = document.getElementById(sections[index]);
+            if (targetSectionElement) {
+                targetSectionElement.classList.remove('hidden');
+                currentSectionIndex = index;
+                console.log(`Sezione mostrata: ${sections[index]}`);
+            } else {
+                console.error(`Errore critico: Impossibile trovare l'elemento della sezione ${sections[index]} per mostrarlo.`);
+                return; // Stop execution if a critical section is missing
+            }
+
+
+            const dailySectionsContainer = document.getElementById('daily-sections');
+            if (dailySectionsContainer) {
+                if (index > 0 && index < sections.length - 1) { // Show daily stats only for daily journey sections
+                    dailySectionsContainer.classList.remove('hidden');
+                } else {
+                    dailySectionsContainer.classList.add('hidden');
+                }
+            }
+
+
+            if (index === 0) { // On intro page, load quote
+                console.log("Sezione intro, chiamo loadPastDataForQuote.");
+                loadPastDataForQuote();
+            }
+            if (index === sections.length - 1) { // On history page, ensure data is loaded
+                 console.log("Sezione storico, chiamo loadHistoricalData.");
+                 loadHistoricalData();
+            }
+        };
+
+        const resetSelections = () => {
+            document.querySelectorAll('.card-choice').forEach(btn => {
+                btn.classList.remove('selected');
+            });
+            currentProteins = 0; // Reset proteins
+            currentWater = 0; // Reset water
+            currentActivityMinutes = 0; // Reset activity minutes
+            currentCalories = 0; // Reset calories
+            selectedBreakfast = false;
+            selectedMiddaySnack = false;
+            selectedLunch = false;
+            selectedAfternoonSnack = false;
+            selectedActivity = false;
+            selectedDinner = false;
+            selectedBedtime = false;
+            // Hide any custom input modals
+            const customInputModal = document.getElementById('custom-input-modal');
+            if (customInputModal) {
+                customInputModal.classList.add('hidden');
+            }
+            console.log("Selezione e statistiche resetate.");
+            addWater(0.25); // Add initial water for new day
+        };
+
+        const navigateNext = () => {
+            console.log(`Tentativo di navigare avanti dalla sezione ${sections[currentSectionIndex]}.`);
+            let canProceed = true;
+            if (currentSectionIndex === 1 && !selectedBreakfast) {
+                canProceed = false;
+                showMessage('Scegli la tua colazione per andare avanti!', 'warning');
+            } else if (currentSectionIndex === 2 && (!selectedMiddaySnack || !selectedLunch)) {
+                canProceed = false;
+                showMessage('Scegli il tuo spuntino e il pranzo per andare avanti!', 'warning');
+            } else if (currentSectionIndex === 3 && (!selectedAfternoonSnack || !selectedActivity)) {
+                canProceed = false;
+                showMessage('Scegli la tua merenda e la tua attività fisica per andare avanti!', 'warning');
+            } else if (currentSectionIndex === 4 && (!selectedDinner || !selectedBedtime)) {
+                canProceed = false;
+                showMessage('Scegli la tua cena e l\'opzione per il riposo per andare avanti!', 'warning');
+            }
+
+            if (canProceed) {
+                if (currentSectionIndex < sections.length - 2) { // Navigate through daily sections (excluding summary and history)
+                    showSection(currentSectionIndex + 1);
+                } else if (currentSectionIndex === sections.length - 2) { // Go to summary
+                    console.log("Navigazione verso il riepilogo, salvando il record giornaliero.");
+                    saveDailyRecord(); // Save data before showing summary
+                    showSection(currentSectionIndex + 1);
+                    renderSummary();
+                }
+            } else {
+                console.log("Navigazione bloccata: requisiti non soddisfatti.");
+            }
+        };
+
+        const renderSummary = () => {
+            console.log("Rendering del riepilogo.");
+            document.getElementById('summary-proteins').textContent = `${currentProteins}g`;
+            document.getElementById('summary-water').textContent = `${currentWater.toFixed(1)}L`;
+            document.getElementById('summary-activity').textContent = `${currentActivityMinutes} minuti`;
+            document.getElementById('summary-calories').textContent = `${currentCalories} kcal`; // Display calories in summary
+
+            let feedbackMessage = '';
+            if (currentProteins >= proteinTarget && currentWater >= waterTarget && currentActivityMinutes >= 30 && currentCalories >= calorieTarget * 0.9 && currentCalories <= calorieTarget * 1.1) { // Check calories within a range
+                feedbackMessage = "Fantastico! Hai raggiunto tutti gli obiettivi di oggi. Continua così! 🎉";
+            } else if (currentProteins >= proteinTarget * 0.8 && currentWater >= waterTarget * 0.8 && currentCalories >= calorieTarget * 0.7 && currentCalories <= calorieTarget * 1.3) {
+                feedbackMessage = "Ottimo lavoro! Sei sulla buona strada con proteine, acqua e calorie. 💪";
+            } else {
+                feedbackMessage = "Ricorda di puntare agli obiettivi di proteine, acqua, calorie e attività. Ogni passo conta! ✨";
+            }
+            document.getElementById('feedback-message').textContent = feedbackMessage;
+
+            if (proteinChartInstance) {
+                proteinChartInstance.destroy();
+            }
+
+            const ctx = document.getElementById('proteinChart');
+            if (!ctx) {
+                console.error("Canvas per il grafico delle proteine non trovato.");
+                return;
+            }
+            const context = ctx.getContext('2d');
+            proteinChartInstance = new Chart(context, {
+                type: 'bar',
+                data: {
+                    labels: ['Proteine Assunte', 'Obiettivo Proteine'],
+                    datasets: [{
+                        label: 'Proteine (grammi)',
+                        data: [currentProteins, proteinTarget],
+                        backgroundColor: [
+                            currentProteins >= proteinTarget ? 'rgba(75, 192, 192, 0.6)' : 'rgba(255, 99, 132, 0.6)',
+                            'rgba(153, 102, 255, 0.6)'
+                        ],
+                        borderColor: [
+                            currentProteins >= proteinTarget ? 'rgba(75, 192, 192, 1)' : 'rgba(255, 99, 132, 1)',
+                            'rgba(153, 102, 255, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: proteinTarget * 1.2,
+                            title: {
+                                display: true,
+                                text: 'Grammi di Proteine'
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(context) {
+                                    const label = context[0].label;
+                                    const value = context[0].parsed.y;
+                                    return `${label}: ${value}g`;
+                                },
+                                label: function(context) {
+                                    return '';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            console.log("Grafico delle proteine renderizzato.");
+        };
+
+        const saveDailyRecord = async () => {
+            console.log("Tentativo di salvare il record giornaliero.");
+            if (!isAuthReady) {
+                showMessage("Servizi Firebase non pronti, impossibile salvare i dati.", 'warning');
+                console.warn("Salvaggio record: Firebase non autenticato/pronto.");
+                return;
+            }
+            if (!appId) {
+                showMessage("ID applicazione non disponibile, impossibile salvare i dati.", 'error');
+                console.error("Salvaggio record: appId non definito.");
+                return;
+            }
+
+
+            const today = new Date().toLocaleDateString('it-IT');
+            const dailyRecordRef = collection(db, `artifacts/${appId}/users/${userId}/elyDailyRecords`); // Updated collection name for 'Ely'
+            console.log(`Salvataggio su collezione: artifacts/${appId}/users/${userId}/elyDailyRecords`);
+
+            try {
+                const q = query(dailyRecordRef, orderBy("dateAdded", "desc"), limit(1));
+                const querySnapshot = await getDocs(q);
+                let recordExistsForToday = false;
+                querySnapshot.forEach((doc) => {
+                    const docData = doc.data();
+                    if (docData.dateAdded && docData.dateAdded.toDate) { // Check if dateAdded exists and is a Timestamp
+                        const docDate = new Date(docData.dateAdded.toDate()).toLocaleDateString('it-IT');
+                        if (docDate === today) {
+                            recordExistsForToday = true;
+                        }
+                    } else if (docData.date === today) { // Fallback for manually set date string
+                        recordExistsForToday = true;
+                    }
+                });
+
+                if (recordExistsForToday) {
+                    showMessage("Record per oggi già salvato!", 'info');
+                    console.log("Record per oggi già esistente, non salvato di nuovo.");
+                    return;
+                }
+
+                await addDoc(dailyRecordRef, {
+                    date: today,
+                    proteins: currentProteins,
+                    water: currentWater,
+                    activityMinutes: currentActivityMinutes,
+                    calories: currentCalories, // Save calories
+                    motivationalQuote: currentMotivationalQuote,
+                    choices: {
+                        breakfast: document.querySelector('.breakfast-choice.selected')?.textContent.trim() || 'Altro',
+                        middaySnack: document.querySelector('.midday-snack-choice.selected')?.textContent.trim() || 'Altro',
+                        lunch: document.querySelector('.lunch-choice.selected')?.textContent.trim() || 'Altro',
+                        afternoonSnack: document.querySelector('.afternoon-snack-choice.selected')?.textContent.trim() || 'Altro',
+                        activity: document.querySelector('.activity-choice.selected')?.textContent.trim() || 'Altro',
+                        dinner: document.querySelector('.dinner-choice.selected')?.textContent.trim() || 'Altro',
+                        bedtime: document.querySelector('.bedtime-choice.selected')?.textContent.trim() || 'Altro',
+                    },
+                    dateAdded: serverTimestamp()
+                });
+                showMessage("Dati giornalieri salvati con successo!", 'success');
+                console.log("Dati giornalieri salvati con successo.");
+                loadHistoricalData(); // Reload history after saving
+            } catch (e) {
+                console.error("Errore nel salvataggio del record giornaliero: ", e);
+                showMessage("Errore nel salvataggio dei dati.", 'error');
+            }
+        };
+
+        const loadHistoricalData = async () => {
+            console.log("Tentativo di caricare lo storico.");
+            if (!isAuthReady) {
+                console.log("Firebase non pronto per caricare lo storico. Riprovo più tardi.");
+                const historyList = document.getElementById('history-list');
+                if(historyList) historyList.innerHTML = '<p class="text-center text-gray-500">Servizi Firebase non pronti per caricare lo storico.</p>';
+                return;
+            }
+             if (!appId) {
+                showMessage("ID applicazione non disponibile, impossibile caricare lo storico.", 'error');
+                console.error("Caricamento storico: appId non definito.");
+                return;
+            }
+
+            const historyList = document.getElementById('history-list');
+            if(historyList) historyList.innerHTML = '<p class="text-center text-gray-500">Caricamento storico...</p>';
+            console.log("Caricamento storico da Firestore per user:", userId);
+
+            const dailyRecordRef = collection(db, `artifacts/${appId}/users/${userId}/elyDailyRecords`); // Updated collection name for 'Ely'
+            const q = query(dailyRecordRef, orderBy("dateAdded", "desc"), limit(30)); // Last 30 days
+
+            try {
+                // Use onSnapshot for real-time updates
+                onSnapshot(q, (snapshot) => {
+                    if(historyList) historyList.innerHTML = ''; // Clear previous content
+                    if (snapshot.empty) {
+                        if(historyList) historyList.innerHTML = '<p class="text-center text-gray-500">Nessun dato storico disponibile. Inizia il tuo percorso!</p>';
+                        console.log("Nessun dato storico trovato.");
+                        return;
+                    }
+                    snapshot.forEach((doc) => {
+                        const data = doc.data();
+                        const date = data.date || (data.dateAdded && data.dateAdded.toDate ? new Date(data.dateAdded.toDate()).toLocaleDateString('it-IT') : 'Data Sconosciuta');
+                        const item = document.createElement('div');
+                        item.className = 'bg-white p-4 rounded-lg shadow-md mb-3';
+                        item.innerHTML = `
+                            <h4 class="font-semibold text-lg text-teal-700 mb-2">🗓️ ${date}</h4>
+                            <p><strong>Proteine:</strong> ${data.proteins}g</p>
+                            <p><strong>Acqua:</strong> ${data.water}L</p>
+                            <p><strong>Attività:</strong> ${data.activityMinutes} min</p>
+                            <p><strong>Calorie:</strong> ${data.calories} kcal</p> <!-- Display calories in history -->
+                            <p class="mt-2 text-gray-600 italic">"${data.motivationalQuote}"</p>
+                            <div class="mt-2 text-sm text-gray-500">
+                                <p>Colazione: ${data.choices?.breakfast || 'N/D'}</p>
+                                <p>Spuntino mattina: ${data.choices?.middaySnack || 'N/D'}</p>
+                                <p>Pranzo: ${data.choices?.lunch || 'N/D'}</p>
+                                <p>Merenda pom.: ${data.choices?.afternoonSnack || 'N/D'}</p>
+                                <p>Attività: ${data.choices?.activity || 'N/D'}</p>
+                                <p>Cena: ${data.choices?.dinner || 'N/D'}</p>
+                                <p>Riposo: ${data.choices?.bedtime || 'N/D'}</p>
+                            </div>
+                        `;
+                        if(historyList) historyList.appendChild(item);
+                    });
+                    console.log(`Caricato ${snapshot.size} record storici in tempo reale.`);
+                }, (error) => {
+                    console.error("Errore onSnapshot per storico: ", error);
+                    if(historyList) historyList.innerHTML = '<p class="text-center text-red-500">Errore nel caricamento dello storico.</p>';
+                });
+            } catch (e) {
+                console.error("Errore nel caricamento dello storico (catch): ", e);
+                if(historyList) historyList.innerHTML = '<p class="text-center text-red-500">Errore nel caricamento dello storico.</p>';
+            }
+        };
+
+        const loadPastDataForQuote = async () => {
+            console.log("Tentativo di caricare dati passati per la frase motivazionale.");
+            if (!isAuthReady) {
+                console.log("Firebase non pronto per generare la frase motivazionale. Attendo autenticazione.");
+                const motivationalQuoteElement = document.getElementById('motivational-quote');
+                if(motivationalQuoteElement) motivationalQuoteElement.textContent = "Caricamento frase motivazionale...";
+                return;
+            }
+            if (!appId) {
+                console.error("ID applicazione non disponibile, impossibile generare frase motivazionale.");
+                const motivationalQuoteElement = document.getElementById('motivational-quote');
+                if(motivationalQuoteElement) motivationalQuoteElement.textContent = "Errore: impossibile generare frase motivazionale.";
+                return;
+            }
+
+            const dailyRecordRef = collection(db, `artifacts/${appId}/users/${userId}/elyDailyRecords`); // Updated collection name for 'Ely'
+            const q = query(dailyRecordRef, orderBy("dateAdded", "desc"), limit(7));
+
+            try {
+                const querySnapshot = await getDocs(q);
+                const pastDataSummary = [];
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    pastDataSummary.push({
+                        date: data.date || (data.dateAdded && data.dateAdded.toDate ? new Date(data.dateAdded.toDate()).toLocaleDateString('it-IT') : 'N/D'),
+                        proteins: data.proteins,
+                        water: data.water,
+                        activityMinutes: data.activityMinutes
+                    });
+                });
+                currentMotivationalQuote = await generateMotivationalQuote(pastDataSummary);
+                const motivationalQuoteElement = document.getElementById('motivational-quote');
+                if(motivationalQuoteElement) motivationalQuoteElement.textContent = `"${currentMotivationalQuote}"`;
+                console.log("Frase motivazionale caricata.");
+            } catch (e) {
+                console.error("Errore nel caricamento dei dati passati per la frase motivazionale:", e);
+                const motivationalQuoteElement = document.getElementById('motivational-quote');
+                if(motivationalQuoteElement) motivationalQuoteElement.textContent = "Oggi è il tuo giorno per brillare! Forza Ely! ✨";
+            }
+        };
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            console.log("DOMContentLoaded event fired. Inizializzazione applicazione.");
+            try {
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                console.log("Firebase Config (parsed):", firebaseConfig);
+                console.log("App ID (runtime):", appId);
+
+                if (Object.keys(firebaseConfig).length === 0) {
+                    showMessage("Configurazione Firebase non disponibile. Controlla le variabili d'ambiente.", 'error');
+                    console.error("Firebase config is empty. Cannot initialize.");
+                    return;
+                }
+
+                try {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    console.log("Firebase app, db, auth inizializzati con successo.");
+                } catch (e) {
+                    console.error("Errore nell'inizializzazione di Firebase:", e);
+                    showMessage("Errore nell'inizializzazione di Firebase. Controlla la console per dettagli.", 'error');
+                    return;
+                }
+
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                console.log("Initial Auth Token disponibile:", !!initialAuthToken);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Firebase autenticato. User ID:", userId);
+                        loadPastDataForQuote(); // Load quote after auth
+                        loadHistoricalData(); // Load history after auth
+                        showMessage("Accesso riuscito!", 'success');
+                    } else {
+                        console.log("Nessun utente autenticato. Tentativo di autenticazione.");
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                                console.log("Autenticazione con token personalizzato riuscita.");
+                            } else {
+                                await signInAnonymously(auth);
+                                console.log("Autenticazione anonima riuscita.");
+                            }
+                        } catch (error) {
+                            console.error("Errore nell'autenticazione Firebase:", error);
+                            showMessage("Errore nell'autenticazione. Le funzionalità di salvataggio potrebbero essere limitate.", 'warning');
+                            userId = `anon-${crypto.randomUUID()}`; // Fallback to random ID if auth fails
+                            isAuthReady = true; // Mark as ready to proceed with limited functionality
+                            console.log("Autenticazione fallita, usando ID utente casuale:", userId);
+                            loadPastDataForQuote(); // Still try to load quote/history if possible
+                            loadHistoricalData();
+                        }
+                    }
+                    updateGlobalStats(); // Update stats display including user ID
+                });
+
+                // Attach event listeners for main navigation buttons
+                const startJourneyBtn = document.getElementById('start-journey-btn');
+                if (startJourneyBtn) {
+                    startJourneyBtn.addEventListener('click', () => {
+                        showSection(1);
+                        updateGlobalStats();
+                        console.log("Click: Inizia il tuo viaggio!");
+                    });
+                    console.log("Listener attached to start-journey-btn.");
+                } else {
+                    console.error("Pulsante 'start-journey-btn' non trovato.");
+                }
+
+                const viewHistoryBtn = document.getElementById('view-history-btn');
+                if (viewHistoryBtn) {
+                    viewHistoryBtn.addEventListener('click', () => {
+                        showSection(sections.indexOf('history-section'));
+                        console.log("Click: Vedi lo storico (intro page)!");
+                    });
+                    console.log("Listener attached to view-history-btn.");
+                } else {
+                    console.error("Pulsante 'view-history-btn' non trovato.");
+                }
+
+                const viewHistoryFromSummaryBtn = document.getElementById('view-history-btn-from-summary');
+                if (viewHistoryFromSummaryBtn) {
+                    viewHistoryFromSummaryBtn.addEventListener('click', () => {
+                        showSection(sections.indexOf('history-section'));
+                        console.log("Click: Vedi lo storico (summary page)!");
+                    });
+                    console.log("Listener attached to view-history-btn-from-summary.");
+                } else {
+                    console.warn("Pulsante 'view-history-btn-from-summary' non trovato (potrebbe essere nascosto inizialmente).");
+                }
+
+                // Navigation buttons within sections
+                const nextMattinaBtn = document.getElementById('next-mattina');
+                if(nextMattinaBtn) {
+                    nextMattinaBtn.addEventListener('click', navigateNext);
+                    console.log("Listener attached to next-mattina.");
+                }
+                const nextPranzoBtn = document.getElementById('next-pranzo');
+                if(nextPranzoBtn) {
+                    nextPranzoBtn.addEventListener('click', navigateNext);
+                    console.log("Listener attached to next-pranzo.");
+                }
+                const nextPomeriggioBtn = document.getElementById('next-pomeriggio');
+                if(nextPomeriggioBtn) {
+                    nextPomeriggioBtn.addEventListener('click', navigateNext);
+                    console.log("Listener attached to next-pomeriggio.");
+                }
+                const nextCenaBtn = document.getElementById('next-cena');
+                if(nextCenaBtn) {
+                    nextCenaBtn.addEventListener('click', navigateNext);
+                    console.log("Listener attached to next-cena.");
+                }
+                
+                const restartJourneyBtn = document.getElementById('restart-journey-btn');
+                if(restartJourneyBtn) {
+                    restartJourneyBtn.addEventListener('click', () => {
+                        currentProteins = 0;
+                        currentWater = 0;
+                        currentActivityMinutes = 0;
+                        currentCalories = 0; // Reset calories on restart
+                        resetSelections();
+                        updateGlobalStats();
+                        showSection(0); // Go back to intro
+                        console.log("Click: Ricomincia il giorno!");
+                    });
+                    console.log("Listener attached to restart-journey-btn.");
+                }
+
+                const backToSummaryBtn = document.getElementById('back-to-summary-btn');
+                if(backToSummaryBtn) {
+                    backToSummaryBtn.addEventListener('click', () => {
+                        showSection(sections.indexOf('summary-section'));
+                        console.log("Click: Torna al riepilogo!");
+                    });
+                    console.log("Listener attached to back-to-summary-btn.");
+                }
+
+
+                const setupChoiceListeners = (selector, type) => {
+                    document.querySelectorAll(selector).forEach(button => {
+                        if (button) {
+                            button.addEventListener('click', () => {
+                                console.log(`Scelta cliccata per ${type}:`, button.textContent.trim());
+                                let selectedFlag;
+                                if (type === 'breakfast') selectedFlag = selectedBreakfast;
+                                else if (type === 'middaySnack') selectedFlag = selectedMiddaySnack;
+                                else if (type === 'lunch') selectedFlag = selectedLunch;
+                                else if (type === 'afternoonSnack') selectedFlag = selectedAfternoonSnack;
+                                else if (type === 'activity') selectedFlag = selectedActivity;
+                                else if (type === 'dinner') selectedFlag = selectedDinner;
+                                else if (type === 'bedtime') selectedFlag = selectedBedtime;
+
+                                // If 'Altro' was already selected for this section, prevent re-selection of pre-defined choices
+                                const altroButtonForSection = document.querySelector(`[data-target="${type}"][data-is-altro="true"]`); // Specific check for the 'Altro' button of this section
+                                if (altroButtonForSection && altroButtonForSection.classList.contains('selected')) {
+                                    showMessage('Hai già fatto una scelta personalizzata per questa sezione!', 'warning');
+                                    return;
+                                }
+
+                                if (!selectedFlag) {
+                                    document.querySelectorAll(selector).forEach(btn => {
+                                        // Only unselect pre-defined choices, not the "Altro" button for the same section
+                                        if (!btn.dataset.isAltro || btn.dataset.isAltro !== "true") {
+                                            btn.classList.remove('selected');
+                                        }
+                                    });
+                                    button.classList.add('selected');
+                                    if (button.dataset.protein) currentProteins += parseInt(button.dataset.protein);
+                                    if (button.dataset.duration) currentActivityMinutes += parseInt(button.dataset.duration);
+                                    if (button.dataset.calories) currentCalories += parseInt(button.dataset.calories); // Add calories
+                                    updateGlobalStats();
+
+                                    if (type === 'breakfast') selectedBreakfast = true;
+                                    else if (type === 'middaySnack') selectedMiddaySnack = true;
+                                    else if (type === 'lunch') selectedLunch = true;
+                                    else if (type === 'afternoonSnack') selectedAfternoonSnack = true;
+                                    else if (type === 'activity') selectedActivity = true;
+                                    else if (type === 'dinner') selectedDinner = true;
+                                    else if (type === 'bedtime') selectedBedtime = true;
+
+                                    addWater(0.25);
+                                } else {
+                                    showMessage(`Hai già scelto per ${type === 'breakfast' ? 'la colazione' : type === 'middaySnack' ? 'lo spuntino di metà mattina' : type === 'lunch' ? 'il pranzo' : type === 'afternoonSnack' ? 'la merenda pomeridiana' : type === 'activity' ? 'l\'attività fisica' : type === 'dinner' ? 'la cena' : 'il riposo'}.`, 'warning');
+                                }
+                            });
+                        } else {
+                            console.warn(`Elemento scelta (${selector}) non trovato.`);
+                        }
+                    });
+                };
+
+                setupChoiceListeners('.breakfast-choice', 'breakfast');
+                setupChoiceListeners('.midday-snack-choice', 'middaySnack');
+                setupChoiceListeners('.lunch-choice', 'lunch');
+                setupChoiceListeners('.afternoon-snack-choice', 'afternoonSnack');
+                setupChoiceListeners('.activity-choice', 'activity');
+                setupChoiceListeners('.dinner-choice', 'dinner');
+                setupChoiceListeners('.bedtime-choice', 'bedtime');
+
+                // Custom Input Modal Logic
+                let currentChoiceTarget = null; // To know which section 'Altro' was clicked for
+
+                document.querySelectorAll('.altro-choice-btn').forEach(button => {
+                    if (button) {
+                        button.addEventListener('click', () => {
+                            console.log(`Click: Altro button per ${button.dataset.target}`);
+                            currentChoiceTarget = button.dataset.target;
+                            const modal = document.getElementById('custom-input-modal');
+                            if (modal) {
+                                document.getElementById('custom-description').value = '';
+                                document.getElementById('custom-protein').value = '';
+                                document.getElementById('custom-calories').value = ''; // Clear custom calories
+                                document.getElementById('custom-duration').value = '';
+
+                                // Hide/show fields based on target
+                                document.getElementById('custom-protein-group').classList.remove('hidden');
+                                document.getElementById('custom-calories-group').classList.remove('hidden'); // Show calories input
+                                document.getElementById('custom-duration-group').classList.add('hidden');
+                                if (currentChoiceTarget.includes('activity')) {
+                                    document.getElementById('custom-protein-group').classList.add('hidden');
+                                    document.getElementById('custom-calories-group').classList.add('hidden'); // Hide calories for activity
+                                    document.getElementById('custom-duration-group').classList.remove('hidden');
+                                }
+
+                                // Check if a choice was already made for this section (including 'Altro' itself)
+                                let selectedFlag;
+                                if (currentChoiceTarget === 'breakfast') selectedFlag = selectedBreakfast;
+                                else if (currentChoiceTarget === 'middaySnack') selectedFlag = selectedMiddaySnack;
+                                else if (currentChoiceTarget === 'lunch') selectedFlag = selectedLunch;
+                                else if (currentChoiceTarget === 'afternoonSnack') selectedFlag = selectedAfternoonSnack;
+                                else if (currentChoiceTarget === 'activity') selectedFlag = selectedActivity;
+                                else if (currentChoiceTarget === 'dinner') selectedFlag = selectedDinner;
+                                else if (currentChoiceTarget === 'bedtime') selectedFlag = selectedBedtime;
+
+                                if (selectedFlag) {
+                                    showMessage('Hai già fatto una scelta per questa sezione!', 'warning');
+                                    return;
+                                }
+
+                                modal.classList.remove('hidden');
+                            } else {
+                                console.error("Modale custom-input-modal non trovato.");
+                            }
+                        });
+                    }
+                });
+
+                const confirmCustomInputBtn = document.getElementById('confirm-custom-input');
+                if (confirmCustomInputBtn) {
+                    confirmCustomInputBtn.addEventListener('click', () => {
+                        console.log("Click: Conferma input personalizzato.");
+                        const description = document.getElementById('custom-description').value;
+                        const protein = parseInt(document.getElementById('custom-protein').value) || 0;
+                        const calories = parseInt(document.getElementById('custom-calories').value) || 0; // Get custom calories
+                        const duration = parseInt(document.getElementById('custom-duration').value) || 0;
+
+                        if (!description) {
+                            showMessage('Inserisci una descrizione per la tua scelta "Altro".', 'warning');
+                            return;
+                        }
+
+                        if (currentChoiceTarget.includes('activity') && duration === 0) {
+                            showMessage('Inserisci la durata in minuti per l\'attività.', 'warning');
+                            return;
+                        }
+                        if (!currentChoiceTarget.includes('activity') && (protein === 0 && calories === 0)) { // Both protein and calories can be 0 if 'altro' choice
+                             showMessage('Inserisci le proteine e/o le calorie stimate (anche 0) per la tua scelta.', 'warning');
+                             return;
+                        }
+
+
+                        // Unselect any other chosen options in this section
+                        const currentSelector = `.${currentChoiceTarget}-choice`;
+                        document.querySelectorAll(currentSelector).forEach(btn => btn.classList.remove('selected'));
+
+                        // Mark the corresponding section as selected via 'Altro'
+                        if (currentChoiceTarget === 'breakfast') selectedBreakfast = true;
+                        else if (currentChoiceTarget === 'middaySnack') selectedMiddaySnack = true;
+                        else if (currentChoiceTarget === 'lunch') selectedLunch = true;
+                        else if (currentChoiceTarget === 'afternoonSnack') selectedAfternoonSnack = true;
+                        else if (currentChoiceTarget === 'activity') selectedActivity = true;
+                        else if (currentChoiceTarget === 'dinner') selectedDinner = true;
+                        else if (currentChoiceTarget === 'bedtime') selectedBedtime = true;
+
+                        // Update global stats
+                        currentProteins += protein;
+                        currentCalories += calories; // Add custom calories
+                        currentActivityMinutes += duration;
+                        addWater(0.25); // Assume water with any choice
+
+                        updateGlobalStats();
+                        const modal = document.getElementById('custom-input-modal');
+                        if (modal) modal.classList.add('hidden');
+                        showMessage(`"${description}" aggiunto!`, 'info');
+
+                        // Visually mark the 'Altro' button as selected for this section
+                        const altroBtn = document.querySelector(`.altro-choice-btn[data-target="${currentChoiceTarget}"]`);
+                        if (altroBtn) {
+                            altroBtn.classList.add('selected');
+                        }
+                    });
+                }
+
+                const cancelCustomInputBtn = document.getElementById('cancel-custom-input');
+                if (cancelCustomInputBtn) {
+                    cancelCustomInputBtn.addEventListener('click', () => {
+                        console.log("Click: Annulla input personalizzato.");
+                        const modal = document.getElementById('custom-input-modal');
+                        if (modal) modal.classList.add('hidden');
+                    });
+                }
+
+                const addWater = (amount) => {
+                    currentWater += amount;
+                    updateGlobalStats();
+                    console.log(`Acqua aggiunta: ${amount}L. Totale: ${currentWater}L`);
+                };
+
+                // Add initial water when the app loads
+                addWater(0.25); // Assume 1 bicchiere at wake up on app load
+
+                // Initial display calls (moved here for correct timing)
+                showSection(0);
+                updateGlobalStats();
+            } catch (e) {
+                console.error("Errore generale in DOMContentLoaded:", e);
+                showMessage("Errore critico all'avvio dell'applicazione. Controlla la console.", 'error');
+            }
+        });
+    </script>
+</head>
+<body class="flex flex-col min-h-screen">
+    <!-- Chosen Palette: Serene Harmony -->
+    <!-- Application Structure Plan: The application is structured as a linear, guided daily journey for Ely. It begins with an introduction, followed by distinct, sequential sections for "Mattina" (Morning), "Pranzo" (Lunch), "Pomeriggio & Merenda" (Afternoon & Snack), and "Cena & Riposo" (Dinner & Rest). Each section focuses on specific activities and dietary choices relevant to that time of day. This linear flow is chosen because it mirrors a natural daily routine, making it intuitive and easy for a 14-year-old to follow. The sequential nature ensures all aspects of the daily plan are addressed without overwhelming the user with too many options at once. At the end, a summary dashboard consolidates the day's progress, offering feedback and reinforcing key metrics, and a dedicated historical view allows tracking over time. Key interactions involve selecting choices (food, activity) that dynamically update daily totals, navigating through sections via "Avanti" buttons, and a modal for "Altro" input. -->
+    <!-- Visualization & Content Choices: Report Info: Ely's health data, protein/calorie/water targets, activity plan (Ring Fit + bodyweight). Goal: Inform Daily Choices & Track Progress. Viz/Presentation Method: Textual explanations and choice cards are used for morning routine, meal options, snack ideas, and activity types. These are presented as interactive buttons or visually distinct blocks within each daily section, with an "Altro" option for custom input. Dynamic text updates show current protein intake, water intake, activity duration, and calorie intake in real-time as Ely makes choices. A Protein Progress Bar Chart (Chart.js) visualizes "Proteine Assunte" vs. "Obiettivo Proteine" in the daily summary. A historical list (HTML generated by JS) shows past daily records. Interaction: Clicking on food/activity choices updates the relevant daily totals. "Altro" buttons trigger a modal for custom data entry. Navigation buttons move between sections. The final bar chart offers a clear, visual summary of a key nutritional target. Chart.js is suitable for the bar chart. Library/Method: Vanilla JavaScript for all interactions and dynamic content updates. Tailwind CSS for layout and styling. Chart.js for the final protein summary visualization. Firebase Firestore for daily data storage and retrieval. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+
+    <div id="message-box" class="hidden"></div>
+
+    <header class="bg-teal-500 py-6 shadow-lg">
+        <div class="container mx-auto px-4 text-center">
+            <h1 class="text-3xl md:text-4xl font-bold text-white tracking-wide">Il Percorso Quotidiano di Ely</h1>
+            <p class="text-teal-100 mt-2 text-lg">La tua guida interattiva per una giornata piena di energia!</p>
+        </div>
+    </header>
+
+    <main class="flex-grow container mx-auto px-4 py-8">
+        <div id="intro-section" class="flex flex-col items-center justify-center text-center p-8 bg-white rounded-xl shadow-lg transition-all duration-500 ease-in-out">
+            <h2 class="text-2xl md:text-3xl font-semibold text-gray-800 mb-4">Benvenuta, Ely! 👋</h2>
+            <p id="motivational-quote" class="text-gray-700 text-lg mb-6 max-w-2xl italic">Caricamento frase motivazionale...</p>
+            <p class="text-gray-700 text-lg mb-6 max-w-2xl">
+                Questo è il tuo percorso personalizzato per ottimizzare la tua forma fisica e sentirti al meglio!
+                Ogni giorno faremo delle scelte importanti per la tua alimentazione e attività.
+                Ricorda, il tuo obiettivo è aumentare la massa muscolare e sentirti più forte e in forma.
+                Iniziamo il tuo viaggio verso una giornata super energica! 💪
+            </p>
+            <button id="start-journey-btn" class="btn-primary text-xl">Inizia il tuo viaggio!</button>
+            <button id="view-history-btn" class="btn-primary mt-4 text-xl bg-gray-600 hover:bg-gray-700">Vedi lo storico 🕰️</button>
+        </div>
+
+        <div id="daily-sections" class="hidden">
+            <!-- Global Daily Stats -->
+            <div class="fixed top-2 right-2 md:top-4 md:right-4 bg-teal-100 p-3 rounded-lg shadow-md text-sm md:text-base text-teal-800 font-semibold z-50">
+                <p>Proteine: <span id="current-proteins">0</span>g / 65g</p>
+                <p>Acqua: <span id="current-water">0</span>L / 2L</p>
+                <p>Calorie: <span id="current-calories">0</span>kcal / 2000kcal</p>
+                <p id="user-id-display" class="text-xs text-teal-700 mt-1"></p>
+            </div>
+
+            <!-- Mattina Section -->
+            <section id="mattina-section" class="p-6 bg-white rounded-xl shadow-lg mb-8 hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">☀️ Mattina: Inizia con la giusta energia!</h2>
+                <p class="text-gray-700 mb-6">
+                    La mattina è il momento perfetto per dare il via al tuo metabolismo. Scegli la tua colazione e assicurati di idratarti bene!
+                </p>
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Colazione:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice breakfast-choice" data-protein="20" data-calories="300">
+                        <span class="text-4xl mb-2">🥣</span>
+                        <span class="font-semibold text-gray-800">Yogurt Greco, Frutta & Noci</span>
+                        <span class="text-sm text-gray-500">20g proteine, 300 kcal</span>
+                    </button>
+                    <button class="card-choice breakfast-choice" data-protein="15" data-calories="250">
+                        <span class="text-4xl mb-2">🥞</span>
+                        <span class="font-semibold text-gray-800">Pancake integrali con sciroppo e frutta</span>
+                        <span class="text-sm text-gray-500">15g proteine, 250 kcal</span>
+                    </button>
+                    <button class="card-choice altro-choice-btn col-span-full" data-target="breakfast" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Scegli la tua colazione personalizzata</span>
+                    </button>
+                </div>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Attività leggera:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice morning-activity-choice" data-activity-type="stretching" data-duration="15">
+                        <span class="text-4xl mb-2">🧘‍♀️</span>
+                        <span class="font-semibold text-gray-800">Stretching Mattutino</span>
+                        <span class="text-sm text-gray-500">15 minuti</span>
+                    </button>
+                    <button class="card-choice morning-activity-choice" data-activity-type="walk" data-duration="20">
+                        <span class="text-4xl mb-2">🚶‍♀️</span>
+                        <span class="font-semibold text-gray-800">Breve camminata</span>
+                        <span class="text-sm text-gray-500">20 minuti</span>
+                    </button>
+                    <button class="card-choice altro-choice-btn col-span-full" data-target="morning-activity" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Attività leggera personalizzata</span>
+                    </button>
+                </div>
+
+                <div class="flex justify-end mt-6">
+                    <button id="next-mattina" class="btn-primary">Avanti al Pranzo ▶️</button>
+                </div>
+            </section>
+
+            <!-- Pranzo Section -->
+            <section id="pranzo-section" class="p-6 bg-white rounded-xl shadow-lg mb-8 hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">🍝 Pranzo: Fai il pieno di energia!</h2>
+                <p class="text-gray-700 mb-6">
+                    Il pranzo è cruciale per mantenere l'energia per il resto della giornata. Scegli un pasto bilanciato con proteine e carboidrati complessi.
+                </p>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Spuntino Metà Mattina:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice midday-snack-choice" data-protein="3" data-calories="100">
+                        <span class="text-4xl mb-2">🍎🥜</span>
+                        <span class="font-semibold text-gray-800">Mela con Mandorle</span>
+                        <span class="text-sm text-gray-500">3g proteine, 100 kcal</span>
+                    </button>
+                    <button class="card-choice midday-snack-choice" data-protein="8" data-calories="120">
+                        <span class="text-4xl mb-2">🥛🍓</span>
+                        <span class="font-semibold text-gray-800">Yogurt Magro con Frutti Rossi</span>
+                        <span class="text-sm text-gray-500">8g proteine, 120 kcal</span>
+                    </button>
+                    <button class="card-choice altro-choice-btn col-span-full" data-target="middaySnack" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Spuntino personalizzato</span>
+                    </button>
+                </div>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Pasto Principale:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice lunch-choice" data-protein="25" data-calories="450">
+                        <span class="text-4xl mb-2">🍗🍚🥗</span>
+                        <span class="font-semibold text-gray-800">Pollo/Pesce, Riso Integrale & Verdure</span>
+                        <span class="text-sm text-gray-500">25g proteine, 450 kcal</span>
+                    </button>
+                    <button class="card-choice lunch-choice" data-protein="22" data-calories="420">
+                        <span class="text-4xl mb-2">🍜🌱</span>
+                        <span class="font-semibold text-gray-800">Pasta Integrale con Legumi & Verdure</span>
+                        <span class="text-sm text-gray-500">22g proteine, 420 kcal</span>
+                    </button>
+                     <button class="card-choice altro-choice-btn col-span-full" data-target="lunch" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Pranzo personalizzato</span>
+                    </button>
+                </div>
+
+                <div class="flex justify-end mt-6">
+                    <button id="next-pranzo" class="btn-primary">Avanti al Pomeriggio ▶️</button>
+                </div>
+            </section>
+
+            <!-- Pomeriggio & Merenda Section -->
+            <section id="pomeriggio-merenda-section" class="p-6 bg-white rounded-xl shadow-lg mb-8 hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">🏃‍♀️ Pomeriggio: Il momento dell'azione!</h2>
+                <p class="text-gray-700 mb-6">
+                    Nel pomeriggio è tempo di muoversi! Scegli la tua merenda e poi dedicati all'attività fisica per rafforzare i tuoi muscoli.
+                </p>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Merenda Pomeridiana:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice afternoon-snack-choice" data-protein="8" data-calories="150">
+                        <span class="text-4xl mb-2">🥛🍌</span>
+                        <span class="font-semibold text-gray-800">Frullato Yogurt e Banana</span>
+                        <span class="text-sm text-gray-500">8g proteine, 150 kcal</span>
+                    </button>
+                    <button class="card-choice afternoon-snack-choice" data-protein="10" data-calories="180">
+                        <span class="text-4xl mb-2">🧀🍞</span>
+                        <span class="font-semibold text-gray-800">Fetta di Pane Integrale con Ricotta</span>
+                        <span class="text-sm text-gray-500">10g proteine, 180 kcal</span>
+                    </button>
+                     <button class="card-choice altro-choice-btn col-span-full" data-target="afternoonSnack" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Merenda personalizzata</span>
+                    </button>
+                </div>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Attività Fisica:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice activity-choice" data-activity-type="ringfit" data-duration="40" data-calories="0">
+                        <span class="text-4xl mb-2">🎮</span>
+                        <span class="font-semibold text-gray-800">Ring Fit Adventure</span>
+                        <span class="text-sm text-gray-500">40 minuti + esercizi a corpo libero</span>
+                    </button>
+                    <button class="card-choice activity-choice" data-activity-type="bodyweight" data-duration="30" data-calories="0">
+                        <span class="text-4xl mb-2">🤸‍♀️</span>
+                        <span class="font-semibold text-gray-800">Esercizi a Corpo Libero</span>
+                        <span class="text-sm text-gray-500">30 minuti (Push-up, Squat, Plank)</span>
+                    </button>
+                    <button class="card-choice altro-choice-btn col-span-full" data-target="activity" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Attività fisica personalizzata</span>
+                    </button>
+                </div>
+
+                <div class="flex justify-end mt-6">
+                    <button id="next-pomeriggio" class="btn-primary">Avanti alla Cena ▶️</button>
+                </div>
+            </section>
+
+            <!-- Cena & Riposo Section -->
+            <section id="cena-riposo-section" class="p-6 bg-white rounded-xl shadow-lg mb-8 hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">🌙 Cena & Riposo: Chiudi in bellezza!</h2>
+                <p class="text-gray-700 mb-6">
+                    La cena deve essere leggera per favorire un buon riposo, ma sempre ricca di nutrienti. E non dimenticare un sonno di qualità!
+                </p>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Cena:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice dinner-choice" data-protein="20" data-calories="380">
+                        <span class="text-4xl mb-2">🐟🥦</span>
+                        <span class="font-semibold text-gray-800">Pesce al vapore & Verdure</span>
+                        <span class="text-sm text-gray-500">20g proteine, 380 kcal</span>
+                    </button>
+                    <button class="card-choice dinner-choice" data-protein="18" data-calories="350">
+                        <span class="text-4xl mb-2">🥗🥣</span>
+                        <span class="font-semibold text-gray-800">Zuppa di Legumi & Insalata</span>
+                        <span class="text-sm text-gray-500">18g proteine, 350 kcal</span>
+                    </button>
+                    <button class="card-choice altro-choice-btn col-span-full" data-target="dinner" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Cena personalizzata</span>
+                    </button>
+                </div>
+
+                <h3 class="text-lg md:text-xl font-medium text-gray-700 mb-3">Momento Relax & Riposo:</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <button class="card-choice bedtime-choice" data-action="relax" data-calories="0">
+                        <span class="text-4xl mb-2">📖</span>
+                        <span class="font-semibold text-gray-800">Lettura o Relax leggero</span>
+                        <span class="text-sm text-gray-500">Aiuta a staccare prima di dormire.</span>
+                    </button>
+                    <button class="card-choice bedtime-choice" data-action="sleep" data-calories="0">
+                        <span class="text-4xl mb-2">😴</span>
+                        <span class="font-semibold text-gray-800">Dormire presto</span>
+                        <span class="text-sm text-gray-500">Obiettivo: 8-9 ore di sonno di qualità.</span>
+                    </button>
+                     <button class="card-choice altro-choice-btn col-span-full" data-target="bedtime" data-is-altro="true">
+                        <span class="text-4xl mb-2">➕</span>
+                        <span class="font-semibold text-gray-800">Altro...</span>
+                        <span class="text-sm text-gray-500">Scelta riposo personalizzata</span>
+                    </button>
+                </div>
+
+                <div class="flex justify-end mt-6">
+                    <button id="next-cena" class="btn-primary">Vedi il riepilogo del giorno ▶️</button>
+                </div>
+            </section>
+
+            <!-- Summary Section -->
+            <section id="summary-section" class="p-6 bg-white rounded-xl shadow-lg hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">📊 Riepilogo della tua giornata!</h2>
+                <p class="text-gray-700 mb-6">
+                    Complimenti per aver completato il tuo percorso quotidiano! Ecco un riepilogo dei tuoi progressi.
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6"> <!-- Adjusted to 3 columns for calories -->
+                    <div class="bg-blue-50 p-4 rounded-lg shadow-inner">
+                        <p class="text-blue-700 font-semibold text-lg mb-2">Totale Proteine:</p>
+                        <p id="summary-proteins" class="text-blue-900 text-3xl font-bold">0g</p>
+                        <p class="text-blue-600 text-sm">Obiettivo: 55-65g</p>
+                    </div>
+                    <div class="bg-green-50 p-4 rounded-lg shadow-inner">
+                        <p class="text-green-700 font-semibold text-lg mb-2">Totale Acqua:</p>
+                        <p id="summary-water" class="text-green-900 text-3xl font-bold">0L</p>
+                        <p class="text-green-600 text-sm">Obiettivo: 2-2.5L</p>
+                    </div>
+                    <div class="bg-purple-50 p-4 rounded-lg shadow-inner"> <!-- New card for calories -->
+                        <p class="text-purple-700 font-semibold text-lg mb-2">Totale Calorie:</p>
+                        <p id="summary-calories" class="text-purple-900 text-3xl font-bold">0kcal</p>
+                        <p class="text-purple-600 text-sm">Obiettivo: 2000kcal</p>
+                    </div>
+                    <div class="bg-yellow-50 p-4 rounded-lg shadow-inner col-span-1 md:col-span-3"> <!-- Span full width for activity -->
+                        <p class="text-yellow-700 font-semibold text-lg mb-2">Tempo di Attività Fisica:</p>
+                        <p id="summary-activity" class="text-yellow-900 text-3xl font-bold">0 minuti</p>
+                        <p class="text-yellow-600 text-sm">Importante per la massa muscolare!</p>
+                    </div>
+                </div>
+
+                <div class="chart-container mb-6">
+                    <canvas id="proteinChart"></canvas>
+                </div>
+
+                <p id="feedback-message" class="text-center text-lg font-medium mb-6"></p>
+
+                <div class="flex justify-center mt-6">
+                    <button id="restart-journey-btn" class="btn-primary">Ricomincia il giorno! 🔄</button>
+                    <button id="view-history-btn-from-summary" class="btn-primary ml-4 bg-gray-600 hover:bg-gray-700">Vedi lo storico 🕰️</button>
+                </div>
+            </section>
+
+            <!-- History Section -->
+            <section id="history-section" class="p-6 bg-white rounded-xl shadow-lg hidden">
+                <h2 class="text-xl md:text-2xl font-semibold text-gray-800 mb-4">📚 Storico dei tuoi progressi</h2>
+                <p class="text-gray-700 mb-6">
+                    Qui puoi vedere un riepilogo di tutte le tue giornate. Ogni passo conta!
+                </p>
+                <div id="history-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <p class="text-center text-gray-500">Caricamento storico...</p>
+                </div>
+                <div class="flex justify-center mt-6">
+                    <button id="back-to-summary-btn" class="btn-primary bg-gray-600 hover:bg-gray-700">Torna al riepilogo ↩️</button>
+                </div>
+            </section>
+
+            <!-- Custom Input Modal -->
+            <div id="custom-input-modal" class="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center hidden z-[1001]">
+                <div class="bg-white p-6 rounded-xl shadow-xl w-11/12 max-w-sm">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">Aggiungi la tua scelta personalizzata</h3>
+                    <div class="mb-4">
+                        <label for="custom-description" class="block text-gray-700 text-sm font-bold mb-2">Descrizione:</label>
+                        <input type="text" id="custom-description" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" placeholder="Es: toast con avocado">
+                    </div>
+                    <div id="custom-protein-group" class="mb-4">
+                        <label for="custom-protein" class="block text-gray-700 text-sm font-bold mb-2">Proteine stimate (grammi):</label>
+                        <input type="number" id="custom-protein" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" value="0" min="0">
+                    </div>
+                    <div id="custom-calories-group" class="mb-4"> <!-- New input for custom calories -->
+                        <label for="custom-calories" class="block text-gray-700 text-sm font-bold mb-2">Calorie stimate (kcal):</label>
+                        <input type="number" id="custom-calories" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" value="0" min="0">
+                    </div>
+                    <div id="custom-duration-group" class="mb-4 hidden">
+                        <label for="custom-duration" class="block text-gray-700 text-sm font-bold mb-2">Durata attività (minuti):</label>
+                        <input type="number" id="custom-duration" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" value="0" min="0">
+                    </div>
+                    <div class="flex justify-end gap-2">
+                        <button id="cancel-custom-input" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-lg">Annulla</button>
+                        <button id="confirm-custom-input" class="btn-primary">Aggiungi</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <footer class="bg-teal-500 py-4 text-center text-white text-sm mt-8">
+        <p>&copy; 2025 Il Percorso di Ely. Tutti i diritti riservati.</p>
+    </footer>
+</body>
+</html>
